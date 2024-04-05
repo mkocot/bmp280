@@ -157,7 +157,9 @@ typedef struct bmp280_handle_s
     uint8_t (*spi_read)(uint8_t reg, uint8_t *buf, uint16_t len);                       /**< point to a spi_read function address */
     uint8_t (*spi_write)(uint8_t reg, uint8_t *buf, uint16_t len);                      /**< point to a spi_write function address */
     void (*delay_ms)(uint32_t ms);                                                      /**< point to a delay_ms function address */
+#ifdef DRIVER_BMP280_DEBUG_PRINT
     void (*debug_print)(const char *const fmt, ...);                                    /**< point to a debug_print function address */
+#endif
     uint8_t inited;                                                                     /**< inited flag */
     uint8_t iic_spi;                                                                    /**< iic spi interface */
     uint16_t t1;                                                                        /**< t1 register */
@@ -282,6 +284,7 @@ typedef struct bmp280_info_s
  */
 #define DRIVER_BMP280_LINK_DELAY_MS(HANDLE, FUC)           (HANDLE)->delay_ms = FUC
 
+#ifdef DRIVER_BMP280_DEBUG_PRINT
 /**
  * @brief     link debug_print function
  * @param[in] HANDLE points to a bmp280 handle structure
@@ -289,6 +292,9 @@ typedef struct bmp280_info_s
  * @note      none
  */
 #define DRIVER_BMP280_LINK_DEBUG_PRINT(HANDLE, FUC)        (HANDLE)->debug_print = FUC
+#else
+#define DRIVER_BMP280_LINK_DEBUG_PRINT(HANDLE, FUC)	   do{}while(0)
+#endif
 
 /**
  * @}
