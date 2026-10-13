@@ -41,6 +41,14 @@
 #include <stdint.h>
 #include <string.h>
 
+#ifdef DRIVER_BMP280_WITH_INT
+typedef uint32_t bmp280_pressure_t;
+typedef int32_t bmp280_temperature_t;
+#else
+typedef float bmp280_pressure_t;
+typedef float bmp280_temperature_t;
+#endif
+
 #ifdef __cplusplus
 extern "C"{
 #endif
@@ -284,7 +292,6 @@ typedef struct bmp280_info_s
  */
 #define DRIVER_BMP280_LINK_DELAY_MS(HANDLE, FUC)           (HANDLE)->delay_ms = FUC
 
-#ifdef DRIVER_BMP280_DEBUG_PRINT
 /**
  * @brief     link debug_print function
  * @param[in] HANDLE points to a bmp280 handle structure
@@ -292,11 +299,9 @@ typedef struct bmp280_info_s
  * @note      none
  */
 #ifdef DRIVER_BMP280_WITH_DEBUG_PRINT
-#define DRIVER_BMP280_DEBUG_PRINT(arg) handle->debug_print(arg)
 #define DRIVER_BMP280_LINK_DEBUG_PRINT(HANDLE, FUC)        (HANDLE)->debug_print = FUC
 #else
-#define DRIVER_BMP280_LINK_DEBUG_PRINT(HANDLE, FUC)	   do{}while(0)
-#define DRIVER_BMP280_DEBUG_PRINT(arg) do{}while(0)
+#define DRIVER_BMP280_LINK_DEBUG_PRINT(HANDLE, FUC)	       do {} while(0)
 #endif
 
 /**
@@ -408,8 +413,8 @@ uint8_t bmp280_deinit(bmp280_handle_t *handle);
  *             - 5 read timeout
  * @note       none
  */
-uint8_t bmp280_read_temperature_pressure(bmp280_handle_t *handle, uint32_t *temperature_raw, float *temperature_c, 
-                                         uint32_t *pressure_raw, float *pressure_pa);
+uint8_t bmp280_read_temperature_pressure(bmp280_handle_t *handle, uint32_t *temperature_raw, bmp280_temperature_t *temperature_c, 
+                                         uint32_t *pressure_raw, bmp280_pressure_t *pressure_pa);
 
 /**
  * @brief      read the pressure data
@@ -425,7 +430,7 @@ uint8_t bmp280_read_temperature_pressure(bmp280_handle_t *handle, uint32_t *temp
  *             - 5 read timeout
  * @note       none
  */
-uint8_t bmp280_read_pressure(bmp280_handle_t *handle, uint32_t *pressure_raw, float *pressure_pa);
+uint8_t bmp280_read_pressure(bmp280_handle_t *handle, uint32_t *pressure_raw, bmp280_pressure_t *pressure_pa);
 
 /**
  * @brief      read the temperature data
@@ -441,7 +446,7 @@ uint8_t bmp280_read_pressure(bmp280_handle_t *handle, uint32_t *pressure_raw, fl
  *             - 5 read timeout
  * @note       none
  */
-uint8_t bmp280_read_temperature(bmp280_handle_t *handle, uint32_t *temperature_raw, float *temperature_c);
+uint8_t bmp280_read_temperature(bmp280_handle_t *handle, uint32_t *temperature_raw, bmp280_temperature_t *temperature_c);
 
 /**
  * @brief     soft reset

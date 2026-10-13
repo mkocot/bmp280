@@ -88,6 +88,15 @@
 #define BMP280_REG_ID                  0xD0        /**< chip id register */
 
 /**
+ * @brief helper macros
+ */
+#ifdef DRIVER_BMP280_WITH_DEBUG_PRINT
+#define DRIVER_BMP280_DEBUG_PRINT(FMT, ...)         handle->debug_print(FMT, ##__VA_ARGS__)
+#else
+#define DRIVER_BMP280_DEBUG_PRINT(FMT, ...) 	    do {} while(0)
+#endif
+
+/**
  * @brief      read multiple bytes
  * @param[in]  *handle points to a bmp280 handle structure
  * @param[in]  reg is the register address
@@ -266,7 +275,20 @@ static uint8_t a_bmp280_get_nvm_calibration(bmp280_handle_t *handle)
  *             - 1 compensate temperature failed
  * @note       none
  */
-static uint8_t a_bmp280_compensate_temperature(bmp280_handle_t *handle, uint32_t raw, float *output)
+#ifdef DRIVER_BMP280_WITH_INT
+static uint8_t a_bmp280_compensate_temperature(bmp280_handle_t *handle, int32_t raw, bmp280_temperature_t *output)
+{
+    int32_t var1, var2;
+    // DECIMAL 0.01 -> 5123 == 51.23C
+    var1 = ((((raw >> 3) - ((int32_t)handle->t1 << 1))) * ((int32_t)handle->t2)) >> 11;
+    var2 = (((((raw >> 4) - ((int32_t)handle->t1)) * ((raw >> 4) - ((int32_t)handle->t1))) >> 12) * ((int32_t)handle->t3)) >> 14;
+    handle->t_fine = var1 + var2;
+    *output = (handle->t_fine * 5 + 128) >> 8;
+
+    return 0;
+}
+#else
+static uint8_t a_bmp280_compensate_temperature(bmp280_handle_t *handle, uint32_t raw, bmp280_temperature_t *output)
 {
     uint8_t res;
     float var1;
@@ -294,6 +316,7 @@ static uint8_t a_bmp280_compensate_temperature(bmp280_handle_t *handle, uint32_t
 
     return res;                                                                                    /* return result */
 }
+#endif
 
 /**
  * @brief      compensate pressure
@@ -305,7 +328,68 @@ static uint8_t a_bmp280_compensate_temperature(bmp280_handle_t *handle, uint32_t
  *             - 1 compensate pressure failed
  * @note       none
  */
-static uint8_t a_bmp280_compensate_pressure(bmp280_handle_t *handle, uint32_t raw, float *output)
+#ifdef DRIVER_BMP280_WITH_INT
+#if 1
+static uint8_t a_bmp280_compensate_pressure(bmp280_handle_t *handle, uint32_t raw, bmp280_pressure_t *output)
+{
+    int64_t var1, var2, p;
+    var1 = ((int64_t)handle->t_fine) - 128000;
+    var2 = var1 * var1 * (int64_t)handle->p6;
+    var2 = var2 + ((var1 * (int64_t)handle->p5) << 17);
+    var2 = var2 + (((int64_t)handle->p4) << 35);
+    var1 = ((var1 * var1 * (int64_t)handle->p3)>>8) + ((var1 * (int64_t)handle->p2)<<12);
+    var1 = (((((int64_t)1)<<47) + var1))*((int64_t)handle->p1)>>33;
+    if (var1 == 0)
+    {
+        *output = 0;
+        return 1;
+    }
+
+    p = 1048576 - raw;
+    p = (((p << 31) - var2)*3125)/var1;
+    var1 = (((int64_t)handle->p9) * (p >> 13) * (p>>13)) >> 25;
+    var2 = (((int64_t)handle->p8) * p) >> 19;
+    p = ((p + var1 + var2) >> 8) + (((int64_t)handle->p7)<<4);
+    *output = p;
+
+    return 0;
+}
+#else
+static uint8_t a_bmp280_compensate_pressure(bmp280_handle_t *handle, uint32_t raw, bmp280_pressure_t *output)
+{
+    int32_t var1, var2;
+    uint32_t p;
+    var1 = ((int32_t)handle->t_fine >> 1) - (int32_t)64000;
+    var2 = (((var1 >> 2) * (var1>>2)) >> 11) * ((int32_t)handle->p6);
+    var2 = var2 + ((var1 * ((int32_t)handle->p5))<<1);
+    var2 = (var2>>2) + (((int32_t)handle->p4)<<16);
+    var1 = (((handle->p4 * (((var1>>2) * (var1>>2))>>13))>>3) + ((((int32_t)handle->p2)*var1)>>1))>>18;
+    var1 = ((((32768+var1))*((int32_t)handle->p1))>>15);
+    if (var1 == 0)
+    {
+        *qoutput = 0;
+        return 1;
+    }
+    p = (((uint32_t)(((int32_t)1048576)-raw)-(var2>>12)))*3125;
+    if (p < 0x80000000)
+    {
+        p = (1 << 1) / ((int32_t)var1);
+    }
+    else
+    {
+        p = (p / (uint32_t)var1) * 2;
+    }
+    var1 = (((int32_t)handle->p9) * ((int32_t)(((p>>3) * (p >> 3))>>13)))>>12;
+    var2 = (((int32_t)(p>>2)) * ((int32_t)handle->p8))>>13;
+    p = (uint32_t)((int32_t)p + ((var1 + var2 + handle->p7) >> 4));
+
+    *qoutput = p;
+
+    return 0;
+}
+#endif
+#else /* DRIVER_BMP280_WITH_INT */
+static uint8_t a_bmp280_compensate_pressure(bmp280_handle_t *handle, uint32_t raw, bmp280_pressure_t *output)
 {
     uint8_t res;
     float var1;
@@ -351,6 +435,7 @@ static uint8_t a_bmp280_compensate_pressure(bmp280_handle_t *handle, uint32_t ra
         return res;                                                               /* return result */
     }
 }
+#endif
 
 /**
  * @brief     set the iic address pin
@@ -474,69 +559,69 @@ uint8_t bmp280_init(bmp280_handle_t *handle)
     if (handle->iic_spi == BMP280_INTERFACE_IIC)                                     /* iic interface */
     {
         if (handle->iic_init == NULL)                                                /* check iic_init */
-    {
+        {
             DRIVER_BMP280_DEBUG_PRINT("bmp280: iic_init is null.\n");                /* iic_init is nul */
 
             return 3;                                                                /* return error */
-    }
+        }
         if (handle->iic_deinit == NULL)                                              /* check iic_deinit */
-    {
+        {
             DRIVER_BMP280_DEBUG_PRINT("bmp280: iic_deinit is null.\n");              /* iic_deinit is null */
 
             return 3;                                                                /* return error */
-    }
+        }
         if (handle->iic_read == NULL)                                                /* check iic_read */
-    {
+        {
             DRIVER_BMP280_DEBUG_PRINT("bmp280: iic_read is null.\n");                /* iic_read is null */
 
             return 3;                                                                /* return error */
-    }
+        }
         if (handle->iic_write == NULL)                                               /* check iic_write */
-    {
+        {
             DRIVER_BMP280_DEBUG_PRINT("bmp280: iic_write is null.\n");               /* iic_write is null */
 
             return 3;                                                                /* return error */
-    }
+        }
             if (handle->iic_init() != 0)                                             /* iic init */
-    {
+            {
                 DRIVER_BMP280_DEBUG_PRINT("bmp280: iic init failed.\n");             /* iic init failed */
 
                 return 1;                                                            /* return error */
-    }
+            }
         }
         else                                                                         /* spi interface */
         {
             if (handle->spi_init == NULL)                                            /* check spi_init */
-    {
+            {
                 DRIVER_BMP280_DEBUG_PRINT("bmp280: spi_init is null.\n");            /* spi_init is nul */
 
                 return 3;                                                            /* return error */
-    }
+            }
             if (handle->spi_deinit == NULL)                                          /* check spi_deinit */
-    {
+            {
                 DRIVER_BMP280_DEBUG_PRINT("bmp280: spi_deinit is null.\n");          /* spi_deinit is nul */
 
                 return 3;                                                            /* return error */
-    }
+            }
             if (handle->spi_read == NULL)                                            /* check spi_read */
-    {
+            {
                 DRIVER_BMP280_DEBUG_PRINT("bmp280: spi_read is null.\n");            /* spi_read is nul */
 
                 return 3;                                                            /* return error */
-    }
+            }
             if (handle->spi_write == NULL)                                           /* check spi_write */
-        {
+            {
                 DRIVER_BMP280_DEBUG_PRINT("bmp280: spi_write is null.\n");           /* spi_write is nul */
 
                 return 3;                                                            /* return error */
-        }
+            }
             if (handle->spi_init() != 0)                                             /* spi init */
-        {
+            {
                 DRIVER_BMP280_DEBUG_PRINT("bmp280: spi init failed.\n");             /* spi init failed */
 
                 return 1;                                                            /* return error */
+            }
         }
-    }
 
     if (a_bmp280_iic_spi_read(handle, BMP280_REG_ID, (uint8_t *)&id, 1) != 0)        /* read chip id */
     {
@@ -841,7 +926,36 @@ uint8_t bmp280_get_pressure_oversampling(bmp280_handle_t *handle, bmp280_oversam
 
     return 0;                                                                  /* success return 0 */
 }
+uint8_t bmp280_set_pressure_temperature_oversampling(bmp280_handle_t *handle, bmp280_oversampling_t oversampling_p, bmp280_oversampling_t oversampling_t)
+{
+    uint8_t prev;
 
+    if (handle == NULL)                                                        /* check handle */
+    {
+        return 2;                                                              /* return error */
+    }
+    if (handle->inited != 1)                                                   /* check handle initialization */
+    {
+        return 3;                                                              /* return error */
+    }
+
+    if (a_bmp280_iic_spi_read(handle, BMP280_REG_CTRL_MEAS, &prev, 1) != 0)    /* read ctrl meas */
+    {
+        DRIVER_BMP280_DEBUG_PRINT("bmp280: read ctrl meas failed.\n");         /* read ctrl meas failed */
+
+        return 1;                                                              /* return error */
+    }
+    prev &= ~((7 << 2) | (7 << 5));                                            /* clear settings */
+    prev |= (oversampling_p << 2) | (oversampling_t << 5);                     /* set oversampling */
+    if (a_bmp280_iic_spi_write(handle, BMP280_REG_CTRL_MEAS, &prev, 1) != 0)   /* write ctrl meas */
+    {
+        DRIVER_BMP280_DEBUG_PRINT("bmp280: write ctrl meas failed.\n");        /* write ctrl meas failed */
+
+        return 1;                                                              /* return error */
+    }
+
+    return 0;                                                                  /* success return 0 */
+}
 /**
  * @brief     set mode
  * @param[in] *handle points to a bmp280 handle structure
@@ -1164,13 +1278,13 @@ uint8_t bmp280_get_spi_wire(bmp280_handle_t *handle, bmp280_spi_wire_t *spi)
  *             - 5 read timeout
  * @note       none
  */
-uint8_t bmp280_read_pressure(bmp280_handle_t *handle, uint32_t *pressure_raw, float *pressure_pa)
+uint8_t bmp280_read_pressure(bmp280_handle_t *handle, uint32_t *pressure_raw, bmp280_pressure_t *pressure_pa)
 {
     uint8_t res;
     uint8_t prev;
     uint32_t timeout;
     uint32_t temperature_raw;
-    float temperature_c;
+    bmp280_temperature_t temperature_c;
     uint8_t buf[6];
 
     if (handle == NULL)                                                                        /* check handle */
@@ -1302,7 +1416,7 @@ uint8_t bmp280_read_pressure(bmp280_handle_t *handle, uint32_t *pressure_raw, fl
  *             - 5 read timeout
  * @note       none
  */
-uint8_t bmp280_read_temperature(bmp280_handle_t *handle, uint32_t *temperature_raw, float *temperature_c)
+uint8_t bmp280_read_temperature(bmp280_handle_t *handle, uint32_t *temperature_raw, bmp280_temperature_t *temperature_c)
 {
     uint8_t res;
     uint8_t prev;
@@ -1420,8 +1534,8 @@ uint8_t bmp280_read_temperature(bmp280_handle_t *handle, uint32_t *temperature_r
  *             - 5 read timeout
  * @note       none
  */
-uint8_t bmp280_read_temperature_pressure(bmp280_handle_t *handle, uint32_t *temperature_raw, float *temperature_c,
-                                         uint32_t *pressure_raw, float *pressure_pa)
+uint8_t bmp280_read_temperature_pressure(bmp280_handle_t *handle, uint32_t *temperature_raw, bmp280_temperature_t *temperature_c,
+                                         uint32_t *pressure_raw, bmp280_pressure_t *pressure_pa)
 {
     uint8_t res;
     uint8_t prev;
@@ -1455,7 +1569,7 @@ uint8_t bmp280_read_temperature_pressure(bmp280_handle_t *handle, uint32_t *temp
         *temperature_raw = ((((uint32_t)(buf[3])) << 12) |
                            (((uint32_t)(buf[4])) << 4) |
                            ((uint32_t)buf[5] >> 4));                                           /* set temperature raw */
-        res = a_bmp280_compensate_temperature(handle, *temperature_raw, temperature_c);        /* compensate temperature */
+        res = a_bmp280_compensate_temperature(handle, *temperature_raw, temperature_c);  /* compensate temperature */
         if (res != 0)
         {
             DRIVER_BMP280_DEBUG_PRINT("bmp280: compensate temperature failed.\n");             /* compensate temperature failed */
@@ -1465,7 +1579,7 @@ uint8_t bmp280_read_temperature_pressure(bmp280_handle_t *handle, uint32_t *temp
         *pressure_raw = ((((int32_t)(buf[0])) << 12) |
                         (((int32_t)(buf[1])) << 4) |
                         (((int32_t)(buf[2])) >> 4));                                           /* set pressure raw */
-        res = a_bmp280_compensate_pressure(handle, *pressure_raw, pressure_pa);                /* compensate pressure */
+        res = a_bmp280_compensate_pressure(handle, *pressure_raw, pressure_pa);          /* compensate pressure */
         if (res != 0)
         {
             DRIVER_BMP280_DEBUG_PRINT("bmp280: compensate pressure failed.\n");                /* compensate pressure failed */
@@ -1521,7 +1635,7 @@ uint8_t bmp280_read_temperature_pressure(bmp280_handle_t *handle, uint32_t *temp
         *temperature_raw = ((((uint32_t)(buf[3])) << 12) |
                            (((uint32_t)(buf[4])) << 4) |
                            ((uint32_t)buf[5] >> 4));                                           /* set temperature raw */
-        res = a_bmp280_compensate_temperature(handle, *temperature_raw, temperature_c);        /* compensate temperature */
+        res = a_bmp280_compensate_temperature(handle, *temperature_raw, temperature_c);  /* compensate temperature */
         if (res != 0)
         {
             DRIVER_BMP280_DEBUG_PRINT("bmp280: compensate temperature failed.\n");             /* compensate temperature failed */
@@ -1531,7 +1645,7 @@ uint8_t bmp280_read_temperature_pressure(bmp280_handle_t *handle, uint32_t *temp
         *pressure_raw = ((((int32_t)(buf[0])) << 12) |
                         (((int32_t)(buf[1])) << 4) |
                         (((int32_t)(buf[2])) >> 4));                                           /* set pressure raw */
-        res = a_bmp280_compensate_pressure(handle, *pressure_raw, pressure_pa);                /* compensate pressure */
+        res = a_bmp280_compensate_pressure(handle, *pressure_raw, pressure_pa);          /* compensate pressure */
         if (res != 0)
         {
             DRIVER_BMP280_DEBUG_PRINT("bmp280: compensate pressure failed.\n");                /* compensate pressure failed */
