@@ -42,8 +42,10 @@
 #include <string.h>
 
 #ifdef DRIVER_BMP280_WITH_INT
-typedef uint32_t bmp280_pressure_t;
-typedef int32_t bmp280_temperature_t;
+#include "fptc.h"
+
+typedef fpt bmp280_pressure_t;                                                             /**< Q18.14 Pa */
+typedef fpt bmp280_temperature_t;                                                          /**< Q16.16 degree C */
 #else
 typedef float bmp280_pressure_t;
 typedef float bmp280_temperature_t;
@@ -182,7 +184,7 @@ typedef struct bmp280_handle_s
     int16_t p7;                                                                         /**< p7 register */
     int16_t p8;                                                                         /**< p8 register */
     int16_t p9;                                                                         /**< p9 register */
-    int32_t t_fine;                                                                     /**< inner register */
+    int32_t t_fine;                                                                     /**< inner register, Q8.8 when DRIVER_BMP280_WITH_INT */
 } bmp280_handle_t;
 
 /**

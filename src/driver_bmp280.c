@@ -276,14 +276,28 @@ static uint8_t a_bmp280_get_nvm_calibration(bmp280_handle_t *handle)
  * @note       none
  */
 #ifdef DRIVER_BMP280_WITH_INT
-static uint8_t a_bmp280_compensate_temperature(bmp280_handle_t *handle, int32_t raw, bmp280_temperature_t *output)
+static uint8_t a_bmp280_compensate_temperature(bmp280_handle_t *handle, uint32_t raw, bmp280_temperature_t *output)
 {
-    int32_t var1, var2;
-    // DECIMAL 0.01 -> 5123 == 51.23C
-    var1 = ((((raw >> 3) - ((int32_t)handle->t1 << 1))) * ((int32_t)handle->t2)) >> 11;
-    var2 = (((((raw >> 4) - ((int32_t)handle->t1)) * ((raw >> 4) - ((int32_t)handle->t1))) >> 12) * ((int32_t)handle->t3)) >> 14;
-    handle->t_fine = var1 + var2;
-    *output = (handle->t_fine * 5 + 128) >> 8;
+    int64_t e;
+    int64_t t_fine;
+
+    /* t_fine = (raw - 16*t1)*t2/2^14 + (raw - 16*t1)^2*t3/2^34, in Q16.16 */
+    e = (int64_t)raw - (((int64_t)handle->t1) << 4);
+    t_fine = ((e * (int64_t)handle->t2) << 2) + ((e * e * (int64_t)handle->t3) >> 18);
+    if (t_fine < -((int64_t)204800 << 16))                                                      /* clamp -40 C */
+    {
+        t_fine = -((int64_t)204800 << 16);
+    }
+    if (t_fine > (435200LL << 16))                                                             /* clamp 85 C */
+    {
+        t_fine = 435200LL << 16;
+    }
+    handle->t_fine = (int32_t)((t_fine + 128) >> 8);                                           /* set t_fine, Q8.8 */
+
+    /* 5120 = 1024*5: shift into int32 first, then divide by 5.  A 64-bit
+       divide by a non-power-of-two pulls in __divdi3 (1.2 kB of libgcc). */
+    t_fine = (t_fine + 2560 + ((t_fine < 0) ? 1023 : 0)) >> 10;                                 /* trunc, not floor */
+    *output = (bmp280_temperature_t)((int32_t)t_fine / 5);                                     /* set output temperature, Q16.16 */
 
     return 0;
 }
@@ -329,65 +343,91 @@ static uint8_t a_bmp280_compensate_temperature(bmp280_handle_t *handle, uint32_t
  * @note       none
  */
 #ifdef DRIVER_BMP280_WITH_INT
-#if 1
 static uint8_t a_bmp280_compensate_pressure(bmp280_handle_t *handle, uint32_t raw, bmp280_pressure_t *output)
 {
-    int64_t var1, var2, p;
-    var1 = ((int64_t)handle->t_fine) - 128000;
-    var2 = var1 * var1 * (int64_t)handle->p6;
-    var2 = var2 + ((var1 * (int64_t)handle->p5) << 17);
-    var2 = var2 + (((int64_t)handle->p4) << 35);
-    var1 = ((var1 * var1 * (int64_t)handle->p3)>>8) + ((var1 * (int64_t)handle->p2)<<12);
-    var1 = (((((int64_t)1)<<47) + var1))*((int64_t)handle->p1)>>33;
-    if (var1 == 0)
+    int64_t aq, hi, lo, var2, uq, n8, pq8;
+    int64_t pi, f, w1, w2;
+    uint64_t num;
+    uint32_t hi16, lo16, k, dv, r, q;
+    unsigned i;
+
+    /* A = t_fine/2 - 64000, Q16.16, split so the squares stay inside int64 */
+    aq = (((int64_t)handle->t_fine) << 7) - (64000LL << 16);
+    hi = aq >> 16;
+    lo = aq & 0xFFFF;
+
+    /* var2 = A^2*p6/2^17 + A*p5/2 + p4*2^16, Q16.16 */
+    var2 = (((hi * hi) * (int64_t)handle->p6 + (1LL << 16)) >> 17) +
+           (((2 * hi * lo) * (int64_t)handle->p6 + (1LL << 32)) >> 33) +
+           (((lo * lo) * (int64_t)handle->p6 + (1LL << 48)) >> 49) +
+           ((aq * (int64_t)handle->p5 + (1LL << 16)) >> 17) +
+           (((int64_t)handle->p4) << 16);
+
+    /* u = p3*A^2/2^38 + p2*A/2^19, Q16 */
+    uq = ((((int64_t)handle->p3) * hi * hi + (1LL << 21)) >> 22) +
+         (((2LL * handle->p3) * hi * lo + (1LL << 37)) >> 38) +
+         ((((int64_t)handle->p3) * lo * lo + (1LL << 53)) >> 54) +
+         ((((int64_t)handle->p2) * aq + (1LL << 18)) >> 19);
+
+    n8 = ((1048576 - (int64_t)raw) << 8) - (var2 >> 4);                                        /* Q8 */
+    if (n8 < 0)
     {
-        *output = 0;
-        return 1;
+        n8 = 0;
+    }
+    if (n8 > ((int64_t)1048576 << 8))
+    {
+        n8 = (int64_t)1048576 << 8;
     }
 
-    p = 1048576 - raw;
-    p = (((p << 31) - var2)*3125)/var1;
-    var1 = (((int64_t)handle->p9) * (p >> 13) * (p>>13)) >> 25;
-    var2 = (((int64_t)handle->p8) * p) >> 19;
-    p = ((p + var1 + var2) >> 8) + (((int64_t)handle->p7)<<4);
-    *output = p;
+    /* k = N*6250/p1 in 1/256 Pa.  Split the 41-bit numerator so both
+       divisions stay 32-bit: (hi16 % p1) < p1 < 2^16 makes the second
+       numerator fit uint32, and no 64-bit division helper is pulled in. */
+    num = (uint64_t)n8 * 6250;
+    hi16 = (uint32_t)(num >> 16);
+    lo16 = (uint32_t)(num & 0xFFFF);
+    k = (hi16 / handle->p1) << 16;
+    k += (((hi16 % handle->p1) << 16) | lo16) / handle->p1;
+    if (k > 60000000u)                                                                         /* clamp 234 kPa */
+    {
+        k = 60000000u;
+    }
+
+    /* pq8 = k/(1+u/2^15) by base-256 long division: dv = 2^23*(1+u/2^15),
+       three rounds lift floor(k/dv) to floor(k*2^24/dv).  k < 2^26 and
+       every remainder stays below dv < 2^24, so all divides are 32-bit -
+       the reciprocal needs no __muldi3 and no __divdi3. */
+    dv = 8388608u + (uint32_t)(uq >> 8);
+    q = k / dv;
+    r = k % dv;
+    for (i = 0; i < 3; i++)
+    {
+        q = (q << 8) + ((r << 8) / dv);
+        r = (r << 8) % dv;
+    }
+    pq8 = (int64_t)(q >> 1);                                                                   /* 1/256 Pa */
+
+    /* p9*P^2/2^31 + p8*P/2^15 + p7, all over 16 */
+    pi = pq8 >> 8;
+    f = pq8 & 255;
+    w1 = ((((int64_t)handle->p9) * pi * pi + (1LL << 22)) >> 23) +
+         ((((int64_t)handle->p9) * pi * f + (1LL << 29)) >> 30) +
+         ((((int64_t)handle->p9) * f * f + (1LL << 38)) >> 39);
+    w2 = (((int64_t)handle->p8) * pq8 + (1LL << 14)) >> 15;
+    pq8 += (w1 + w2 + (((int64_t)handle->p7) << 8) + 8) >> 4;
+
+    pi = pq8 << 6;                                                                             /* 1/256 Pa -> Q18.14, 64 units per step */
+    if (pi < (30000LL << 14))                                                                  /* clamp 30000 Pa */
+    {
+        pi = 30000LL << 14;
+    }
+    if (pi > (110000LL << 14))                                                                 /* clamp 110000 Pa */
+    {
+        pi = 110000LL << 14;
+    }
+    *output = (bmp280_pressure_t)pi;                                                           /* set output pressure, Q18.14 */
 
     return 0;
 }
-#else
-static uint8_t a_bmp280_compensate_pressure(bmp280_handle_t *handle, uint32_t raw, bmp280_pressure_t *output)
-{
-    int32_t var1, var2;
-    uint32_t p;
-    var1 = ((int32_t)handle->t_fine >> 1) - (int32_t)64000;
-    var2 = (((var1 >> 2) * (var1>>2)) >> 11) * ((int32_t)handle->p6);
-    var2 = var2 + ((var1 * ((int32_t)handle->p5))<<1);
-    var2 = (var2>>2) + (((int32_t)handle->p4)<<16);
-    var1 = (((handle->p4 * (((var1>>2) * (var1>>2))>>13))>>3) + ((((int32_t)handle->p2)*var1)>>1))>>18;
-    var1 = ((((32768+var1))*((int32_t)handle->p1))>>15);
-    if (var1 == 0)
-    {
-        *qoutput = 0;
-        return 1;
-    }
-    p = (((uint32_t)(((int32_t)1048576)-raw)-(var2>>12)))*3125;
-    if (p < 0x80000000)
-    {
-        p = (1 << 1) / ((int32_t)var1);
-    }
-    else
-    {
-        p = (p / (uint32_t)var1) * 2;
-    }
-    var1 = (((int32_t)handle->p9) * ((int32_t)(((p>>3) * (p >> 3))>>13)))>>12;
-    var2 = (((int32_t)(p>>2)) * ((int32_t)handle->p8))>>13;
-    p = (uint32_t)((int32_t)p + ((var1 + var2 + handle->p7) >> 4));
-
-    *qoutput = p;
-
-    return 0;
-}
-#endif
 #else /* DRIVER_BMP280_WITH_INT */
 static uint8_t a_bmp280_compensate_pressure(bmp280_handle_t *handle, uint32_t raw, bmp280_pressure_t *output)
 {
